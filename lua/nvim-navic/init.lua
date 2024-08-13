@@ -59,9 +59,11 @@ local config = {
 	click = false,
 	lsp = {
 		auto_attach = false,
-		preference = nil
+		preference = nil,
 	},
-	format_text = function(a) return a end,
+	format_text = function(a)
+		return a
+	end,
 }
 
 setmetatable(config.icons, {
@@ -189,7 +191,7 @@ end
 
 function M.format_data(data, opts)
 	if data == nil then
-		return ""
+		return "", 0
 	end
 
 	local local_config = {}
@@ -227,7 +229,6 @@ function M.format_data(data, opts)
 		local_config = config
 	end
 
-
 	local location = {}
 
 	local function add_hl(kind, name)
@@ -245,7 +246,7 @@ function M.format_data(data, opts)
 			vim.cmd("normal! m'")
 			vim.api.nvim_win_set_cursor(0, {
 				data[minwid].scope["start"].line,
-				data[minwid].scope["start"].character
+				data[minwid].scope["start"].character,
 			})
 			if cnt > 1 then
 				local ok, navbuddy = pcall(require, "nvim-navbuddy")
@@ -259,11 +260,7 @@ function M.format_data(data, opts)
 	end
 
 	local function add_click(level, component)
-		return "%"
-			.. level
-			.. "@v:lua.navic_click_handler@"
-			.. component
-			.. "%X"
+		return "%" .. level .. "@v:lua.navic_click_handler@" .. component .. "%X"
 	end
 
 	for i, v in ipairs(data) do
@@ -308,12 +305,229 @@ function M.format_data(data, opts)
 		ret = table.concat(location, local_config.separator)
 	end
 
-	return ret
+	local plain_str = ret:gsub("%%#.-#", ""):gsub("%%*", "")
+	local display_width = vim.fn.strdisplaywidth(plain_str)
+
+	return ret, display_width
+end
+
+function M.get_filetype_icon()
+	local file_extension = vim.fn.expand("%:e")
+	local file_name = string.lower(vim.fn.expand("%:t"))
+	local icons_ok, icons = pcall(require, "nvim-web-devicons")
+	if not icons_ok then
+		return "/"
+	else
+		local icon_color_ok, icon, color = pcall(icons.get_icon_color, file_name, file_extension)
+		if not icon_color_ok or icon == nil or icon == "" then
+			return ""
+		end
+		local hl_group_name = "WinbarIcon_" .. (file_extension ~= "" and file_extension or file_name)
+		vim.api.nvim_set_hl(0, hl_group_name, { fg = color })
+		return string.format("%%#%s#%s%%*", hl_group_name, icon)
+	end
+end
+
+function M.find_shortest_unique_prefix(path, name)
+	local dir = vim.loop.fs_scandir(path)
+	if not dir then
+		return name
+	end
+
+	local files = {}
+	while true do
+		local file = vim.loop.fs_scandir_next(dir)
+		if file == nil then
+			break
+		end
+		table.insert(files, file)
+	end
+
+	for i = 1, #name do
+		local prefix = name:sub(1, i)
+		local count = 0
+		for _, file in ipairs(files) do
+			if file:sub(1, #prefix) == prefix then
+				count = count + 1
+				if count > 1 then
+					break
+				end
+			end
+		end
+		if count == 1 then
+			return prefix
+		end
+	end
+	return name
+end
+
+function M.compress_path(full_path)
+	local parts = {}
+	for part in full_path:gmatch("[^/]+") do
+		table.insert(parts, part)
+	end
+
+	local compressed = {}
+	local current_path = "/"
+	for _, part in ipairs(parts) do
+		if part == "~" then
+			table.insert(compressed, part)
+			current_path = vim.fn.expand("~")
+		else
+			local prefix = M.find_shortest_unique_prefix(current_path, part)
+			table.insert(compressed, prefix)
+			current_path = current_path .. "/" .. part
+		end
+	end
+
+	return table.concat(compressed, "/")
+end
+
+function M.shorten_path(full_path, max_length)
+	local compressed_path = M.compress_path(full_path)
+	local full_parts = vim.split(full_path, "/", { plain = true })
+	local compressed_parts = vim.split(compressed_path, "/", { plain = true })
+	local result = full_path
+
+	-- Step 3: Shorten parts from left to right
+	for i = 1, #full_parts do
+		if vim.fn.strdisplaywidth(result) <= max_length then
+			return result
+		end
+
+		local compressed_part = compressed_parts[i]
+
+		if #full_parts[i] > #compressed_part then
+			-- Step 3a: Replace last two characters with ellipsis
+			compressed_part = compressed_parts[i] .. "…"
+			full_parts[i] = full_parts[i]:sub(1, -3) .. "…"
+			result = table.concat(full_parts, "/")
+		end
+
+		-- Step 3b: Remove characters from right to left
+		while #full_parts[i] > #compressed_part and vim.fn.strdisplaywidth(result) > max_length do
+			full_parts[i] = full_parts[i]:gsub("…", ""):sub(1, -2) .. "…"
+			result = table.concat(full_parts, "/")
+		end
+	end
+
+	-- Step 4: Shorten parts from left to right
+	for i = 1, #full_parts do
+		while vim.fn.strdisplaywidth(full_parts[i]) > 2 and vim.fn.strdisplaywidth(result) > max_length do
+			full_parts[i] = full_parts[i]:gsub("…", ""):sub(1, -2) .. "…"
+			result = table.concat(full_parts, "/")
+		end
+		if vim.fn.strdisplaywidth(result) <= max_length then
+			return result
+		end
+	end
+
+	-- Step 5: If still too long, start removing parts from the left
+	-- while #full_parts > 1 and vim.fn.strdisplaywidth(result) > max_length do
+	-- 	table.remove(full_parts, 1)
+	-- 	full_parts[1] = "…"
+	-- 	result = table.concat(full_parts, "/")
+	-- end
+
+	-- If it's still too long, just return ""
+	if vim.fn.strdisplaywidth(result) > max_length then
+		return ""
+	end
+
+	return result
+end
+
+function M.clean_filepath(path, max_width)
+	local os_name = vim.uv.os_uname().sysname
+	local home = os_name == "Windows_NT" and os.getenv("USERPROFILE") or os.getenv("HOME")
+
+	if path:find(home, 1, true) == 1 then
+		path = "~" .. path:sub(#home + 1)
+	end
+
+	if vim.fn.strdisplaywidth(path) > max_width then
+		path = M.shorten_path(path, max_width)
+	end
+	return path
+end
+
+function M.get_prefix(data_width, winbar_width)
+	local filetype_icon = " " .. M.get_filetype_icon() .. " "
+	local file_path = vim.fn.fnamemodify(vim.fn.expand("%:p"), ":h")
+	local file_name = vim.fn.expand("%:t")
+	local separator = " 〉"
+
+	local available_width = winbar_width
+		- data_width
+		- vim.fn.strdisplaywidth((filetype_icon .. file_name .. separator):gsub("%%#.-#", ""):gsub("%%*", ""))
+
+	local file_path_clean = M.clean_filepath(file_path, available_width)
+
+	local prefix = file_path_clean .. filetype_icon .. file_name .. separator
+	local prefix_width = vim.fn.strdisplaywidth(prefix:gsub("%%#.-#", ""):gsub("%%*", ""))
+
+	if data_width + prefix_width > winbar_width then
+		prefix = filetype_icon .. file_name .. separator
+		prefix_width = vim.fn.strdisplaywidth(prefix:gsub("%%#.-#", ""):gsub("%%*", ""))
+
+		while data_width + prefix_width > winbar_width and #file_name > 1 do
+			file_name = file_name:sub(1, -2)
+			prefix = filetype_icon .. file_name .. "…" .. separator
+			prefix_width = vim.fn.strdisplaywidth(prefix:gsub("%%#.-#", ""):gsub("%%*", ""))
+		end
+
+		if data_width + prefix_width > winbar_width then
+			file_name = file_name:sub(1, -1)
+			prefix = filetype_icon .. file_name .. "…" .. separator
+		end
+	end
+
+	return prefix
+end
+
+function M.shorten_data(formatted_data, max_width)
+	local parts = vim.split(formatted_data, config.separator, { plain = true })
+	local ellipsis = "…"
+	local current_width = vim.fn.strdisplaywidth(formatted_data:gsub("%%#.-#", ""):gsub("%%*", ""))
+	for i = 1, #parts do
+		if current_width <= max_width then
+			break
+		end
+		local part = parts[i]
+		local before, highlight, text, after = part:match("^(.-)(%#NavicText#)(.-)(%*)")
+		if text and before and after then
+			local original_text = text
+			while vim.fn.strdisplaywidth(text) > 1 and current_width > max_width do
+				text = vim.fn.strcharpart(text, 0, vim.fn.strchars(text) - 1)
+				current_width = current_width - 1
+			end
+			if text ~= original_text then
+				text = text .. ellipsis
+			end
+			parts[i] = before .. highlight .. text .. "%*"
+		end
+	end
+	while #parts > 1 and current_width > max_width do
+		table.remove(parts, 1)
+		current_width = vim.fn.strdisplaywidth(table.concat(parts, config.separator):gsub("%%#.-#", ""):gsub("%%*", ""))
+	end
+	local result = table.concat(parts, config.separator)
+	if vim.fn.strdisplaywidth(result:gsub("%%#.-#", ""):gsub("%%*", ""):gsub("*", "")) > max_width then
+		result = result:gsub("%%#NavicText#.-%%*$", "")
+	end
+	return result
 end
 
 function M.get_location(opts, bufnr)
+	local win_width = vim.fn.winwidth(0)
 	local data = M.get_data(bufnr)
-	return M.format_data(data, opts)
+	local ret, data_width = M.format_data(data, opts)
+	local prefix = M.get_prefix(data_width, vim.fn.winwidth(0))
+	local prefix_width = vim.fn.strdisplaywidth(prefix:gsub("%%#.-#", ""):gsub("%%*", ""))
+	if win_width < prefix_width + data_width then
+		ret = M.shorten_data(ret, win_width - prefix_width - 1)
+	end
+	return prefix .. ret
 end
 
 local awaiting_lsp_response = {}
